@@ -30,10 +30,15 @@ REPO_ROOT = os.path.dirname(ROOT)
 sys.path.insert(0, REPO_ROOT)
 from brackets import BRACKET_LIST
 
-control_tok = Tokenizer.from_file(os.path.join(REPO_ROOT, 'control', 'tokenizer.json'))
-bracket_tok = Tokenizer.from_file(os.path.join(REPO_ROOT, 'bracket', 'bracket_tokenizer.json'))
-scrambled_tok = Tokenizer.from_file(os.path.join(REPO_ROOT, 'scrambled', 'bracket_tokenizer.json'))
-bracket_transfer_tok = Tokenizer.from_file(os.path.join(REPO_ROOT, 'bracket_transfer', 'bracket_tokenizer.json'))
+TOKENIZER_DIR = os.path.join(REPO_ROOT, 'tokenizer')
+
+control_tok = Tokenizer.from_file(os.path.join(TOKENIZER_DIR, 'tokenizer.json'))
+# bracket/scrambled/bracket_transfer all share the one bracket vocab, so these
+# three are the same tokenizer -- kept as separate names to keep the per-arm
+# tokenize_to_bin calls below readable.
+bracket_tok = Tokenizer.from_file(os.path.join(TOKENIZER_DIR, 'bracket_tokenizer.json'))
+scrambled_tok = bracket_tok
+bracket_transfer_tok = bracket_tok
 
 
 def tokenize_to_bin(text_filename, tok, bin_filename, assert_no_brackets=False):

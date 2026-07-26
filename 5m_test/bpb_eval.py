@@ -3,6 +3,13 @@ Test bench: evaluate all four models -- control, bracket, scrambled, and
 bracket_transfer -- on their own held-out TEST sets and report bits-per-byte
 (BPB).
 
+Scores one split at a time: --split picks which (default: split_config.py's
+SPLIT_SEED). Checkpoints, test bins and vocabs all come from that split's own
+split<N>/ directory, never from the working dirs -- those belong to whichever
+split ran last, so scoring a checkpoint against them would eventually mean
+scoring it on documents it trained on, which inflates the result rather than
+erroring.
+
 Deliberately scores test_data/*.bin, not val.bin. val.bin is the internal
 5/95 slice of train.txt that train.py's estimate_loss() checks during
 training and best_val_loss uses to decide which checkpoint to save -- it
@@ -44,7 +51,12 @@ model.config.block_size, giving it the same context length as control --
 same tokens in, same tokens out, so the comparison needs no fairness
 argument. control/bracket/scrambled are each evaluated at their own native
 block_size.
+
+Usage:
+    python bpb_eval.py             # the split in split_config.py
+    python bpb_eval.py --split 43  # a specific archived split
 """
+import argparse
 import os
 import math
 import sys
@@ -54,7 +66,9 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-ROOT = os.path.dirname(__file__)
+ROOT = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, ROOT)
+from split_config import SPLIT_SEED
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 DTYPE = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float32
 EVAL_BATCH_SIZE = 64
@@ -65,41 +79,55 @@ from model import GPTConfig, GPT
 from brackets import BRACKET_LIST
 from tokenizers import Tokenizer
 
-CLEAN_TEST_PATH = os.path.join(ROOT, 'test_data', 'test.txt')
-with open(CLEAN_TEST_PATH, 'r', encoding='utf-8') as f:
-    clean_test_docs = f.readlines()
-TEST_BYTES = sum(len(d.encode('utf-8')) for d in clean_test_docs)
-
 ctx = torch.autocast(device_type='cuda', dtype=DTYPE) if DEVICE == 'cuda' else nullcontext()
 
-# Bracket token ids are looked up from the tokenizer file rather than
-# assumed to be ">= 8000" -- train_tokenizer_8000.py now registers bracket
-# characters as special tokens BEFORE training (to keep them atomic and
-# out of the BPE merge table), which puts them at the START of the vocab
-# (0..len(BRACKET_LIST)-1), not the end.
-_bracket_tok = Tokenizer.from_file(os.path.join(ROOT, 'bracket', 'bracket_tokenizer.json'))
-BRACKET_TOKEN_IDS = torch.tensor(
-    sorted(_bracket_tok.token_to_id(c) for c in BRACKET_LIST), device=DEVICE
-)
 
-# bracket_ids is None for control: its tokenizer is a separate, independently
-# trained vocab that has never seen a bracket character, so ids 0..187 there
-# are ordinary word content, not markup -- applying BRACKET_TOKEN_IDS (which
-# means something completely different in control's vocab space) would
-# misclassify a chunk of real word tokens as "bracket" by numeric coincidence.
-# bracket, scrambled, and bracket_transfer all share the actual bracket
-# tokenizer, so it's valid for all three.
-#
-# Each entry: (name, ckpt_path, test_bin_path, bracket_ids, eval_block_size).
-# eval_block_size is None for control/bracket/scrambled, meaning "use the
-# checkpoint's own model.config.block_size"; bracket_transfer overrides it to
-# EVAL_BLOCK_SIZE so it's scored at the same context length as control.
-RUNS = [
-    ('control', os.path.join(ROOT, 'control', 'out', 'ckpt.pt'), os.path.join(ROOT, 'test_data', 'test.bin'), None, None),
-    ('bracket', os.path.join(ROOT, 'bracket', 'out', 'ckpt.pt'), os.path.join(ROOT, 'test_data', 'test_annotated.bin'), BRACKET_TOKEN_IDS, None),
-    ('scrambled', os.path.join(ROOT, 'scrambled', 'out', 'ckpt.pt'), os.path.join(ROOT, 'test_data', 'test_scrambled.bin'), BRACKET_TOKEN_IDS, None),
-    ('bracket_transfer', os.path.join(ROOT, 'bracket_transfer', 'out', 'ckpt.pt'), os.path.join(ROOT, 'test_data', 'test_bracket_transfer.bin'), BRACKET_TOKEN_IDS, EVAL_BLOCK_SIZE),
-]
+def split_dir(split):
+    return os.path.join(ROOT, f'split{split}')
+
+
+def clean_test_bytes(split):
+    """The shared bpb denominator: UTF-8 bytes of this split's clean held-out
+    text. Split-specific, so it must be read from the split's archive rather
+    than the working test_data/ dir."""
+    with open(os.path.join(split_dir(split), 'test_data', 'test.txt'), 'r', encoding='utf-8') as f:
+        return sum(len(d.encode('utf-8')) for d in f.readlines())
+
+
+def bracket_token_ids(split):
+    """Looked up from the split's own tokenizer file rather than assumed to be
+    ">= 8000" -- train_tokenizer_8000.py registers bracket characters as
+    special tokens BEFORE training (to keep them atomic and out of the BPE
+    merge table), which puts them at the START of the vocab
+    (0..len(BRACKET_LIST)-1), not the end. Per-split because the vocab is
+    retrained on each split's train.txt, so the ids need not agree across
+    splits."""
+    tok = Tokenizer.from_file(os.path.join(split_dir(split), 'tokenizer', 'bracket_tokenizer.json'))
+    return torch.tensor(sorted(tok.token_to_id(c) for c in BRACKET_LIST), device=DEVICE)
+
+
+def build_runs(split):
+    """Each entry: (name, ckpt_path, test_bin_path, bracket_ids, eval_block_size).
+
+    bracket_ids is None for control: its tokenizer is a separate, independently
+    trained vocab that has never seen a bracket character, so ids 0..187 there
+    are ordinary word content, not markup -- applying the bracket ids (which
+    mean something completely different in control's vocab space) would
+    misclassify a chunk of real word tokens as "bracket" by numeric
+    coincidence. bracket, scrambled, and bracket_transfer all share the actual
+    bracket tokenizer, so it's valid for all three.
+
+    eval_block_size is None for control/bracket/scrambled, meaning "use the
+    checkpoint's own model.config.block_size"; bracket_transfer overrides it to
+    EVAL_BLOCK_SIZE so it's scored at the same context length as control."""
+    d = split_dir(split)
+    ids = bracket_token_ids(split)
+    return [
+        ('control', os.path.join(d, 'control', 'ckpt.pt'), os.path.join(d, 'test_data', 'test.bin'), None, None),
+        ('bracket', os.path.join(d, 'bracket', 'ckpt.pt'), os.path.join(d, 'test_data', 'test_annotated.bin'), ids, None),
+        ('scrambled', os.path.join(d, 'scrambled', 'ckpt.pt'), os.path.join(d, 'test_data', 'test_scrambled.bin'), ids, None),
+        ('bracket_transfer', os.path.join(d, 'bracket_transfer', 'ckpt.pt'), os.path.join(d, 'test_data', 'test_bracket_transfer.bin'), ids, EVAL_BLOCK_SIZE),
+    ]
 
 
 def load_model(ckpt_path):
@@ -153,9 +181,22 @@ def total_nats(model, test_bin_path, bracket_ids, eval_block_size=None, batch_si
 
 
 def main():
-    print(f"clean test bytes (shared denominator): {TEST_BYTES:,}")
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument('--split', type=int, default=SPLIT_SEED, metavar='SPLIT_SEED',
+                        help=f"which split's runs to score (default: {SPLIT_SEED}, from split_config.py)")
+    args = parser.parse_args()
+
+    d = split_dir(args.split)
+    if not os.path.isdir(d):
+        raise SystemExit(f"no such split: {d}\n"
+                         f"(set SPLIT_SEED in split_config.py and run run_experiments.py, "
+                         f"or pass --split for one already archived)")
+
+    test_bytes = clean_test_bytes(args.split)
+    print(f"split {args.split}: clean test bytes (shared denominator): {test_bytes:,}")
     results = {}
-    for name, ckpt_path, test_bin_path, bracket_ids, eval_block_size in RUNS:
+    for name, ckpt_path, test_bin_path, bracket_ids, eval_block_size in build_runs(args.split):
         if not os.path.exists(ckpt_path):
             print(f"{name}: skipped, no checkpoint at {ckpt_path}")
             continue
@@ -166,8 +207,8 @@ def main():
         word_nats, bracket_nats, n_word_tokens, n_bracket_tokens = total_nats(
             model, test_bin_path, bracket_ids, eval_block_size
         )
-        word_bpb = word_nats / math.log(2) / TEST_BYTES
-        bracket_bpb = bracket_nats / math.log(2) / TEST_BYTES
+        word_bpb = word_nats / math.log(2) / test_bytes
+        bracket_bpb = bracket_nats / math.log(2) / test_bytes
         sum_bpb = word_bpb + bracket_bpb
         results[name] = sum_bpb
         print(f"{name}: word {n_word_tokens:,} tokens -> {word_bpb:.4f} bpb, "

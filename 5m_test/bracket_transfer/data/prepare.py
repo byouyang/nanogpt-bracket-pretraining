@@ -1,20 +1,24 @@
 import os
+import sys
 import numpy as np
 from tokenizers import Tokenizer
 
-data_dir = os.path.dirname(__file__)
-tokenizer_path = os.path.join(os.path.dirname(data_dir), 'bracket_tokenizer.json')
+data_dir = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(os.path.dirname(data_dir))
+sys.path.insert(0, REPO_ROOT)
+from val_split import split_train_val
+
+tokenizer_path = os.path.join(REPO_ROOT, 'tokenizer', 'bracket_tokenizer.json')
 
 tok = Tokenizer.from_file(tokenizer_path)
 
 with open(os.path.join(data_dir, 'train.txt'), 'r', encoding='utf-8') as f:
     lines = f.readlines()
 
-# train.txt is 95% of the full dataset (test.txt already holds the other 5%),
-# so carving off 5/95 of it as val yields an overall 90/5/5 train/val/test split.
-n_val = round(len(lines) * 5 / 95)
-train_data = ''.join(lines[:-n_val])
-val_data = ''.join(lines[-n_val:])
+# 5/95 of train.txt carved off as val -> an overall 90/5/5 train/val/test
+# split. Shared with every other arm (and with train.py's bpb denominator) via
+# val_split.py, so the same documents land in val everywhere.
+train_data, val_data = split_train_val(lines)
 
 train_ids = tok.encode(train_data).ids
 val_ids = tok.encode(val_data).ids

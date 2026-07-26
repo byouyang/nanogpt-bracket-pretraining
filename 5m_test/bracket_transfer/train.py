@@ -38,12 +38,16 @@ from torch.distributed import init_process_group, destroy_process_group
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from seed_config import SEED
+from split_config import SPLIT_SEED
+from val_split import clean_val_bytes
 from model import GPTConfig, GPT
 
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
 # I/O
-out_dir = 'out'
+# keyed by the SPLIT seed, not seed_config.SEED: the split is what this
+# experiment varies, so it's what has to keep runs from clobbering each other.
+out_dir = f'../split{SPLIT_SEED}/bracket_transfer'
 eval_interval = 250
 log_interval = 10
 eval_iters = 200
@@ -73,11 +77,13 @@ phase1_frac = 0.7            # fraction of the TOTAL TOKEN BUDGET spent on phase
                               # sweep it (e.g. 0.5 and 0.7 at minimum).
 
 # total token budget is matched to control/train.py's run (batch_size=64,
-# block_size=256, max_iters=12000) so this arm sees exactly as many training
+# block_size=256, max_iters=24000) so this arm sees exactly as many training
 # tokens as control -- an unmatched-compute comparison would be meaningless.
+# These three must track control/train.py: if you change its max_iters, change
+# control_max_iters here to match or the arms silently stop being comparable.
 control_batch_size = 64
 control_block_size = 256
-control_max_iters = 12000
+control_max_iters = 24000
 total_token_budget = control_batch_size * control_block_size * control_max_iters
 
 gradient_accumulation_steps = 1 # used to simulate larger batch sizes
@@ -205,6 +211,38 @@ if os.path.exists(meta_path):
         meta = pickle.load(f)
     meta_vocab_size = meta['vocab_size']
     print(f"found vocab_size = {meta_vocab_size} (inside {meta_path})")
+
+# bits-per-byte logging. estimate_loss() returns mean per-token loss in nats,
+# and the four arms tokenize differently, so their val/loss curves are NOT
+# comparable to each other. bpb converts to bits and divides by the CLEAN val
+# slice's byte count -- the same denominator for every arm (see
+# val_split.clean_val_bytes), which is what puts the curves on one axis.
+#
+# One scale PER PHASE: get_batch swaps the val set at the boundary (annotated
+# -> clean), so the val token count changes while the clean byte denominator
+# stays fixed. Expect val/bpb to step DOWN at the boundary -- phase 2 stops
+# paying to predict bracket markup that phase 1 was charged for. That's real,
+# not an artifact, but it does mean the curve isn't continuous across the
+# boundary and only the phase-2 stretch is comparable to control.
+#
+# total val nats ~= mean per-token val loss * val token count, so this is a
+# constant rescale of val/loss: no extra forward passes. It's an estimate over
+# estimate_loss()'s random windows, not the deterministic full pass bpb_eval.py
+# runs over the held-out test set -- a training curve, not a reportable number.
+CLEAN_VAL_BYTES = clean_val_bytes()
+
+
+def _val_tokens(dd):
+    return len(np.memmap(os.path.join(dd, 'val.bin'), dtype=np.uint16, mode='r'))
+
+
+VAL_BPB_SCALE = {
+    1: _val_tokens(data_dir) / (math.log(2) * CLEAN_VAL_BYTES),
+    2: _val_tokens(clean_data_dir) / (math.log(2) * CLEAN_VAL_BYTES),
+}
+print(f"val bpb ({CLEAN_VAL_BYTES:,} clean val bytes): "
+      f"phase 1 = val/loss * {VAL_BPB_SCALE[1]:.4f} ({_val_tokens(data_dir):,} annotated val tokens), "
+      f"phase 2 = val/loss * {VAL_BPB_SCALE[2]:.4f} ({_val_tokens(clean_data_dir):,} clean val tokens)")
 
 # model init
 model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=block_size,
@@ -343,19 +381,23 @@ while True:
     # evaluate the loss on train/val sets and write checkpoints
     if iter_num % eval_interval == 0 and master_process:
         losses = estimate_loss(current_phase)
-        print(f"step {iter_num} (phase {current_phase}): train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+        val_bpb = losses['val'] * VAL_BPB_SCALE[current_phase]
+        print(f"step {iter_num} (phase {current_phase}): train loss {losses['train']:.4f}, "
+              f"val loss {losses['val']:.4f}, val bpb {val_bpb:.4f}")
         if wandb_log:
             wandb.log({
                 "iter": iter_num,
                 "phase": current_phase,
                 "train/loss": losses['train'],
                 "val/loss": losses['val'],
+                "val/bpb": val_bpb,
                 "lr": lr,
                 "mfu": running_mfu*100, # convert to percentage
             })
         if tensorboard_log:
             writer.add_scalar("train/loss", losses['train'], iter_num)
             writer.add_scalar("val/loss", losses['val'], iter_num)
+            writer.add_scalar("val/bpb", val_bpb, iter_num)
             writer.add_scalar("lr", lr, iter_num)
             writer.add_scalar("mfu", running_mfu*100, iter_num) # convert to percentage
             writer.add_scalar("phase", current_phase, iter_num)

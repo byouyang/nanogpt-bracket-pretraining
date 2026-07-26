@@ -10,25 +10,25 @@ ROOT = os.path.dirname(__file__)
 CONTROL_TRAIN_PATH = os.path.join(ROOT, 'control', 'data', 'train.txt')
 ANNOTATED_TRAIN_PATH = os.path.join(ROOT, 'bracket', 'data', 'train.txt')
 
-CONTROL_TOKENIZER_PATH = os.path.join(ROOT, 'control', 'tokenizer.json')
-BRACKET_TOKENIZER_PATH = os.path.join(ROOT, 'bracket', 'bracket_tokenizer.json')
-# bracket_tokenizer.json is duplicated into these two dirs too (scrambled
-# reuses the same bracket alphabet; bracket_transfer needs its own copy for
-# Arm D) -- keep all three in sync so nobody trains against a stale copy.
-BRACKET_TOKENIZER_COPIES = [
-    os.path.join(ROOT, 'scrambled', 'bracket_tokenizer.json'),
-    os.path.join(ROOT, 'bracket_transfer', 'bracket_tokenizer.json'),
-]
+# Both vocabs live in one shared tokenizer/ dir. bracket/, scrambled/ and
+# bracket_transfer/ all encode against the same bracket vocab, and keeping a
+# copy in each arm meant three chances to train against a stale one.
+TOKENIZER_DIR = os.path.join(ROOT, 'tokenizer')
+CONTROL_TOKENIZER_PATH = os.path.join(TOKENIZER_DIR, 'tokenizer.json')
+BRACKET_TOKENIZER_PATH = os.path.join(TOKENIZER_DIR, 'bracket_tokenizer.json')
 
 CONTROL_META_PATH = os.path.join(ROOT, 'control', 'data', 'meta.pkl')
 BRACKET_META_PATH = os.path.join(ROOT, 'bracket', 'data', 'meta.pkl')
-# same vocab space as BRACKET_META_PATH (all encoded with bracket_tokenizer.json),
-# so their meta.pkl is just a copy of bracket's, mirroring BRACKET_TOKENIZER_COPIES
+# meta.pkl stays per-data-dir (unlike the tokenizers): train.py reads vocab_size
+# from whatever data_dir it was pointed at. These three share bracket's vocab
+# space, so they get a copy of bracket's meta.
 BRACKET_META_COPIES = [
     os.path.join(ROOT, 'scrambled', 'data', 'meta.pkl'),
     os.path.join(ROOT, 'bracket_transfer', 'data', 'meta.pkl'),
     os.path.join(ROOT, 'bracket_transfer', 'data_clean', 'meta.pkl'),
 ]
+
+os.makedirs(TOKENIZER_DIR, exist_ok=True)
 
 # train the base tokenizer on the control (unannotated) train set only
 tok = Tokenizer(models.BPE())
@@ -82,10 +82,7 @@ print(f"bracket token ids verified atomic: {bracket_ids[0]}..{bracket_ids[-1]} "
       f"({len(bracket_ids)} tokens, contiguous={bracket_ids == list(range(bracket_ids[0], bracket_ids[-1]+1))})")
 
 bracket_tok.save(BRACKET_TOKENIZER_PATH)
-for copy_path in BRACKET_TOKENIZER_COPIES:
-    os.makedirs(os.path.dirname(copy_path), exist_ok=True)
-    shutil.copyfile(BRACKET_TOKENIZER_PATH, copy_path)
-    print(f"copied bracket tokenizer -> {copy_path}")
+print(f"bracket tokenizer -> {BRACKET_TOKENIZER_PATH}")
 
 with open(BRACKET_META_PATH, 'wb') as f:
     pickle.dump({'vocab_size': bracket_tok.get_vocab_size()}, f)

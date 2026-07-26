@@ -19,7 +19,8 @@ arm's data/ folder, since it's used across arms (see test_data/README below
 import os
 import random
 
-SEED = 42
+from split_config import SPLIT_SEED
+
 VAL_FRACTION = 0.05
 
 ROOT = os.path.dirname(__file__)
@@ -59,7 +60,8 @@ def main():
 
     n = len(annotated_lines)
     indices = list(range(n))
-    random.Random(SEED).shuffle(indices)
+    random.Random(SPLIT_SEED).shuffle(indices)
+    print(f"split seed {SPLIT_SEED}: shuffling {n} line-aligned documents")
 
     n_val = int(n * VAL_FRACTION)
     val_idx = set(indices[:n_val])

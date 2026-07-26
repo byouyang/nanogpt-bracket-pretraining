@@ -30,14 +30,15 @@ import sys
 import numpy as np
 from tokenizers import Tokenizer
 
-ROOT = os.path.dirname(__file__)
+ROOT = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(ROOT)
 sys.path.insert(0, REPO_ROOT)
 from brackets import BRACKET_LIST
+from val_split import split_train_val
 
 CLEAN_SOURCE_DIR = os.path.join(REPO_ROOT, 'control', 'data')
 data_dir = os.path.join(ROOT, 'data_clean')
-tokenizer_path = os.path.join(ROOT, 'bracket_tokenizer.json')
+tokenizer_path = os.path.join(REPO_ROOT, 'tokenizer', 'bracket_tokenizer.json')
 
 os.makedirs(data_dir, exist_ok=True)
 tok = Tokenizer.from_file(tokenizer_path)
@@ -45,11 +46,10 @@ tok = Tokenizer.from_file(tokenizer_path)
 with open(os.path.join(CLEAN_SOURCE_DIR, 'train.txt'), 'r', encoding='utf-8') as f:
     lines = f.readlines()
 
-# train.txt is 95% of the full dataset (test.txt already holds the other 5%),
-# so carving off 5/95 of it as val yields an overall 90/5/5 train/val/test split.
-n_val = round(len(lines) * 5 / 95)
-train_data = ''.join(lines[:-n_val])
-val_data = ''.join(lines[-n_val:])
+# Same carve-out as every other arm (val_split.py) applied to the clean source
+# -- so this phase-2 val slice is the same documents as phase 1's, just
+# unannotated, and matches the slice train.py's bpb denominator measures.
+train_data, val_data = split_train_val(lines)
 
 train_ids = tok.encode(train_data).ids
 val_ids = tok.encode(val_data).ids
